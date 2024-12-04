@@ -38,9 +38,11 @@ library AddressSet {
     }
     
     function clear(State storage _state) internal {
-        while (_state.list.length > 0) {
-            delete _state.index[_state.list[_state.list.length - 1]];
+        uint256 length  = _state.list.length;
+        while (length > 0) {
+            delete _state.index[_state.list[length - 1]];
             _state.list.pop();
+            length--;
         }
     }
 }

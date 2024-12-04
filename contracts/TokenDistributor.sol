@@ -21,6 +21,7 @@ contract TokenDistributor is Ownable ,ReentrancyGuard {
     using SafeCast for uint256;
 
     uint256 public constant MAX_ALL_REWARD_TOKENS = 5;
+    uint256 public constant MAX_BUFFER_DAY = 90;
 
     enum RewardStatus {
         CLAIMABLE,
@@ -65,6 +66,7 @@ contract TokenDistributor is Ownable ,ReentrancyGuard {
     ) Ownable() {
         require(_owner != address(0), "TD: zero owner address");
         require(_bufferDay > 1, "TD: bufferDay must be greater than 1");
+        require(_bufferDay <= MAX_BUFFER_DAY, "TD: Max bufferDay exceeded");
         _transferOwnership(_owner);
         bufferTime = _bufferDay * 1 days;
     }
@@ -125,8 +127,8 @@ contract TokenDistributor is Ownable ,ReentrancyGuard {
     function withdrawExpiredToken(address _token, address _receiver ) external onlyOwner nonReentrant{
         require(rewardTokens[_token], "TD: invalid _token");
         require(_receiver != address(0), "TD: zero receiver address");
-        require(totalExpired[_token] != 0, "TD: totalExpired should be greater than zero");
         uint256 amount = totalExpired[_token];
+        require(amount != 0, "TD: totalExpired should be greater than zero");
         totalExpired[_token] = 0;
         IERC20(_token).safeTransfer(_receiver, amount);
         emit WithdrawalExpiredToken(_token, _receiver, amount);
@@ -138,7 +140,6 @@ contract TokenDistributor is Ownable ,ReentrancyGuard {
     /// @param _receiver address of receiver
     /// @param _amount amount to withdraw
     function withdrawEmergencyToken(IERC20 _token, address _receiver, uint256 _amount) external onlyOwner nonReentrant{
-        require(address(_token) != address(0), "TD: zero token address");
         require(_receiver != address(0), "TD: zero receiver address");
         if(rewardTokens[address(_token)]){
             uint256 tokenBalance = _token.balanceOf(address(this));
