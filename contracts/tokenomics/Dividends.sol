@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.7.5;
 
-import "./lib/Ownable.sol";
+import "./lib/Ownable2Step.sol";
 import "./lib/SafeERC20.sol";
 import "./lib/ReentrancyGuard.sol";
 import "./lib/SafeMath.sol";
@@ -26,7 +26,7 @@ import "./interfaces/IWETH.sol";
  * This transfer from the pending slot to the distribution slot is based on cycleDividendsPercent and CYCLE_PERIOD_SECONDS
  *
  */
-contract Dividends is Ownable, ReentrancyGuard, IXSPRKTokenUsage, IDividends {
+contract Dividends is Ownable2Step, ReentrancyGuard, IXSPRKTokenUsage, IDividends {
   using SafeMath for uint256;
   using SafeERC20 for IERC20;
   using EnumerableSet for EnumerableSet.AddressSet;
@@ -68,11 +68,13 @@ contract Dividends is Ownable, ReentrancyGuard, IXSPRKTokenUsage, IDividends {
   uint256 public constant DEFAULT_CYCLE_DIVIDENDS_PERCENT = 100; // 1%
   uint256 public constant MAX_CYCLE_DIVIDENDS_PERCENT = 10000; // 100%
   // dividends will be added to the currentDistributionAmount on each new cycle
-  uint256 internal _cycleDurationSeconds = 7 days;
+  uint256 public constant  CYCLE_DURATION_SECONDS = 7 days;
   uint256 public currentCycleStartTime;
 
-  constructor(address xSPRKToken_, uint256 startTime_, address weth_) {
+  constructor(address xSPRKToken_, uint256 startTime_, address weth_, address owner_) Ownable(owner_) {
     require(xSPRKToken_ != address(0), "zero address");
+    require(weth_ != address(0), "zero address");
+    require(startTime_ > block.timestamp, "invalid starttime");
     xSPRKToken = xSPRKToken_;
     currentCycleStartTime = startTime_;
     weth = weth_;
@@ -132,8 +134,8 @@ contract Dividends is Ownable, ReentrancyGuard, IXSPRKTokenUsage, IDividends {
   /****************** VIEWS ******************/
   /*******************************************/
 
-  function cycleDurationSeconds() external view returns (uint256) {
-    return _cycleDurationSeconds;
+  function cycleDurationSeconds() external pure returns (uint256) {
+    return CYCLE_DURATION_SECONDS;
   }
 
   /**
@@ -161,7 +163,7 @@ contract Dividends is Ownable, ReentrancyGuard, IXSPRKTokenUsage, IDividends {
    * @dev Returns time at which the next cycle will start
    */
   function nextCycleStartTime() public view returns (uint256) {
-    return currentCycleStartTime.add(_cycleDurationSeconds);
+    return currentCycleStartTime.add(CYCLE_DURATION_SECONDS);
   }
 
   /**
@@ -186,7 +188,7 @@ contract Dividends is Ownable, ReentrancyGuard, IXSPRKTokenUsage, IDividends {
       );
       lastUpdateTime = nextCycleStartTime();
       dividendAmountPerSecond_ = dividendsInfo_.pendingAmount.mul(dividendsInfo_.cycleDividendsPercent).div(100).div(
-        _cycleDurationSeconds
+        CYCLE_DURATION_SECONDS
       );
     }
    
@@ -312,7 +314,7 @@ contract Dividends is Ownable, ReentrancyGuard, IXSPRKTokenUsage, IDividends {
   /**
    * @dev Emergency withdraw all dividend tokens' balances on the contract
    */
-  function emergencyWithdrawAll() external onlyOwner {
+  function emergencyWithdrawAll() external {
     for (uint256 index = 0; index < _distributedTokens.length(); ++index) {
       emergencyWithdraw(IERC20(_distributedTokens.at(index)));
     }
@@ -467,7 +469,7 @@ contract Dividends is Ownable, ReentrancyGuard, IXSPRKTokenUsage, IDividends {
           10000
         );
         dividendsInfo_.currentDistributionAmount = currentDistributionAmount;
-        dividendsInfo_.dividendsAmountPerSecond = currentDistributionAmount.mul(1e2).div(_cycleDurationSeconds);
+        dividendsInfo_.dividendsAmountPerSecond = currentDistributionAmount.mul(1e2).div(CYCLE_DURATION_SECONDS);
         dividendsInfo_.pendingAmount = pendingAmount.sub(currentDistributionAmount);
       } else {
         // stop the token's distribution on next cycle

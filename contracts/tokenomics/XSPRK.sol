@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.7.5;
 
-import "./lib/Ownable.sol";
+import "./lib/Ownable2Step.sol";
 import "./lib/SafeMath.sol";
 import "./lib/SafeERC20.sol";
 import "./lib/ERC20.sol";
@@ -18,7 +18,7 @@ import "./interfaces/IXSPRKTokenUsage.sol";
  * It can be converted back to SPRK through a vesting process
  * This contract is made to receive xSPRK deposits from users in order to allocate them to Usages (plugins) contracts
  */
-contract XSPRKToken is Ownable, ReentrancyGuard, ERC20("SparkDEX escrowed token", "xSPRK"), IXSPRKToken {
+contract XSPRKToken is Ownable2Step, ReentrancyGuard, ERC20("SparkDEX escrowed token", "xSPRK"), IXSPRKToken {
     using Address for address;
     using SafeMath for uint256;
     using EnumerableSet for EnumerableSet.AddressSet;
@@ -51,6 +51,8 @@ contract XSPRKToken is Ownable, ReentrancyGuard, ERC20("SparkDEX escrowed token"
 
     uint256 public constant MAX_FIXED_RATIO = 100; // 100%
     address public constant BURN_ADDRESS = 0x000000000000000000000000000000000000dEaD;
+    uint256 public constant TIMELOCK_BUFFER = 1 days;
+    uint256 public constant TIMELOCK_MAX_DURATION = 7 days;
 
     // Redeeming min/max settings
     uint256 public minRedeemRatio = 50; // 1:0.5
@@ -63,10 +65,12 @@ contract XSPRKToken is Ownable, ReentrancyGuard, ERC20("SparkDEX escrowed token"
 
     mapping(address => XSPRKBalance) public xSPRKBalances; // User's xSPRK balances
     mapping(address => RedeemInfo[]) public userRedeems; // User's redeeming instances
+    mapping (bytes32 => uint256) public pendingActions;
 
-    constructor(IXSPRK sprkToken_, uint256 _redeemTimeForTeam) {
+    constructor(address sprkToken_, uint256 _redeemTimeForTeam, address owner_) Ownable(owner_) {
         require(_redeemTimeForTeam > block.timestamp,"invalid redeem time");
-        sprkToken = sprkToken_;
+        require(sprkToken_ != address(0), "zero address");
+        sprkToken = IXSPRK(sprkToken_);
         _transferWhitelist.add(address(this));
         redeemTimeForTeam = _redeemTimeForTeam;
     }
@@ -88,6 +92,15 @@ contract XSPRKToken is Ownable, ReentrancyGuard, ERC20("SparkDEX escrowed token"
     event Allocate(address indexed userAddress, address indexed usageAddress, uint256 amount);
     event Deallocate(address indexed userAddress, address indexed usageAddress, uint256 amount, uint256 fee);
     event WaitingUsersForRedeemSet(address indexed userAddress);
+    event SignalPendingAction(bytes32 action);
+    event ClearAction(bytes32 action);
+    event SignalSetWaitingUsersForRedeem(address user, bytes32 action);
+    event SignalUpdateRedeemSettings(uint256 minRedeemRatio_,
+        uint256 maxRedeemRatio_,
+        uint256 minRedeemDuration_,
+        uint256 maxRedeemDuration_,
+        uint256 redeemDividendsAdjustment_, bytes32 action);
+    event SignalUpdateDeallocationFee(address usageAddress, uint256 fee, bytes32 action);
 
     /***********************************************/
     /****************** MODIFIERS ******************/
@@ -192,15 +205,52 @@ contract XSPRKToken is Ownable, ReentrancyGuard, ERC20("SparkDEX escrowed token"
     /*******************************************************/
     /****************** OWNABLE FUNCTIONS ******************/
     /*******************************************************/
+    /**
+    * @dev signal set users for redeem waiting list
+    */
+    function signalSetWaitingUsersForRedeem(address _user) external onlyOwner {
+        bytes32 action = keccak256(abi.encodePacked("setWaitingUsersForRedeem", _user));
+        _setPendingAction(action);
+        emit SignalSetWaitingUsersForRedeem(_user, action);
+    }
+
 
     /**
     * @dev set users for redeem waiting list
     */
     function setWaitingUsersForRedeem(address _user) external onlyOwner {
+        bytes32 action = keccak256(abi.encodePacked("setWaitingUsersForRedeem", _user));
+        _validateAction(action);
+        _clearAction(action);        
         require(_user != address(0), "invalid user");
         waitingUsersForRedeem[_user] = true;
         emit WaitingUsersForRedeemSet(_user);
     }
+
+    /**
+     * @dev signal updates all redeem ratios and durations
+     *
+     * Must only be called by owner
+     */
+    function signalUpdateRedeemSettings(        
+        uint256 minRedeemRatio_,
+        uint256 maxRedeemRatio_,
+        uint256 minRedeemDuration_,
+        uint256 maxRedeemDuration_,
+        uint256 redeemDividendsAdjustment_) external onlyOwner {
+        bytes32 action = keccak256(abi.encodePacked("updateRedeemSettings", minRedeemRatio_,
+        maxRedeemRatio_,
+        minRedeemDuration_,
+        maxRedeemDuration_,
+        redeemDividendsAdjustment_));
+        _setPendingAction(action);
+        emit SignalUpdateRedeemSettings(minRedeemRatio_,
+        maxRedeemRatio_,
+        minRedeemDuration_,
+        maxRedeemDuration_,
+        redeemDividendsAdjustment_, action);
+    }
+
 
     /**
      * @dev Updates all redeem ratios and durations
@@ -214,6 +264,13 @@ contract XSPRKToken is Ownable, ReentrancyGuard, ERC20("SparkDEX escrowed token"
         uint256 maxRedeemDuration_,
         uint256 redeemDividendsAdjustment_
     ) external onlyOwner {
+        bytes32 action = keccak256(abi.encodePacked("updateRedeemSettings", minRedeemRatio_,
+        maxRedeemRatio_,
+        minRedeemDuration_,
+        maxRedeemDuration_,
+        redeemDividendsAdjustment_));
+        _validateAction(action);
+        _clearAction(action);      
         require(minRedeemRatio_ <= maxRedeemRatio_, "updateRedeemSettings: wrong ratio values");
         require(minRedeemDuration_ < maxRedeemDuration_, "updateRedeemSettings: wrong duration values");
         // should never exceed 100%
@@ -242,11 +299,22 @@ contract XSPRKToken is Ownable, ReentrancyGuard, ERC20("SparkDEX escrowed token"
         emit UpdateDividendsAddress(address(dividendsAddress), address(dividendsAddress_));
         dividendsAddress = dividendsAddress_;
     }
+    /**
+     * @dev signal updates fee paid by users when deallocating from "usageAddress"
+     */
+    function signalUpdateDeallocationFee(address usageAddress, uint256 fee) external onlyOwner {
+        bytes32 action = keccak256(abi.encodePacked("updateDeallocationFee", usageAddress, fee));
+        _setPendingAction(action);
+        emit SignalUpdateDeallocationFee(usageAddress, fee, action);
+    }
 
     /**
      * @dev Updates fee paid by users when deallocating from "usageAddress"
      */
     function updateDeallocationFee(address usageAddress, uint256 fee) external onlyOwner {
+        bytes32 action = keccak256(abi.encodePacked("updateDeallocationFee", usageAddress, fee));
+        _validateAction(action);
+        _clearAction(action);              
         require(fee <= MAX_DEALLOCATION_FEE, "updateDeallocationFee: too high");
 
         usagesDeallocationFee[usageAddress] = fee;
@@ -303,6 +371,7 @@ contract XSPRKToken is Ownable, ReentrancyGuard, ERC20("SparkDEX escrowed token"
         require(!waitingUsersForRedeem[msg.sender] || redeemTimeForTeam <= block.timestamp,"Redeem time has not come yet for team");
         require(xSPRKAmount > 0, "redeem: xSPRKAmount cannot be null");
         require(duration >= minRedeemDuration, "redeem: duration too low");
+        require(duration < maxRedeemDuration * 2, "redeem: duration too high"); // to prevent excessively large duration values.
 
         _transfer(msg.sender, address(this), xSPRKAmount);
         XSPRKBalance storage balance = xSPRKBalances[msg.sender];
@@ -555,4 +624,28 @@ contract XSPRKToken is Ownable, ReentrancyGuard, ERC20("SparkDEX escrowed token"
         /* solhint-disable not-rely-on-time */
         return block.timestamp;
     }
+
+    function cancelAction(bytes32 _action) external onlyOwner {
+        _clearAction(_action);
+    }
+
+    function _setPendingAction(bytes32 _action) private {
+        require(pendingActions[_action] == 0, "action already signalled");
+        pendingActions[_action] = block.timestamp + TIMELOCK_BUFFER;
+        emit SignalPendingAction(_action);
+    }
+
+    function _validateAction(bytes32 _action) private view {
+        uint256 pendingAction = pendingActions[_action];
+        require(pendingAction != 0, "action not signalled");
+        require(pendingAction < block.timestamp, "action time not yet passed");
+        require(pendingAction + TIMELOCK_MAX_DURATION > block.timestamp, "action expired");
+    }
+
+    function _clearAction(bytes32 _action) private {
+        require(pendingActions[_action] != 0, "invalid _action");
+        delete pendingActions[_action];
+        emit ClearAction(_action);
+    }
+
 }
