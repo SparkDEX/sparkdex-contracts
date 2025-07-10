@@ -65,7 +65,11 @@ contract XSPRKToken is Ownable2Step, ReentrancyGuard, ERC20("SparkDEX escrowed t
 
     mapping(address => XSPRKBalance) public xSPRKBalances; // User's xSPRK balances
     mapping(address => RedeemInfo[]) public userRedeems; // User's redeeming instances
-    mapping (bytes32 => uint256) public pendingActions;
+    struct PendingAction {
+        uint256 timestamp; // timestamp
+        bytes32 parametersKey; // parameters keccak 
+    }
+    mapping (bytes32 => PendingAction) public pendingActions;
 
     constructor(address sprkToken_, uint256 _redeemTimeForTeam, address owner_) Ownable(owner_) {
         require(_redeemTimeForTeam > block.timestamp,"invalid redeem time");
@@ -92,7 +96,7 @@ contract XSPRKToken is Ownable2Step, ReentrancyGuard, ERC20("SparkDEX escrowed t
     event Allocate(address indexed userAddress, address indexed usageAddress, uint256 amount);
     event Deallocate(address indexed userAddress, address indexed usageAddress, uint256 amount, uint256 fee);
     event WaitingUsersForRedeemSet(address indexed userAddress);
-    event SignalPendingAction(bytes32 action);
+    event SignalPendingAction(bytes32 action, bytes32 parametersKey);
     event ClearAction(bytes32 action);
     event SignalSetWaitingUsersForRedeem(address user, bytes32 action);
     event SignalUpdateRedeemSettings(uint256 minRedeemRatio_,
@@ -210,7 +214,7 @@ contract XSPRKToken is Ownable2Step, ReentrancyGuard, ERC20("SparkDEX escrowed t
     */
     function signalSetWaitingUsersForRedeem(address _user) external onlyOwner {
         bytes32 action = keccak256(abi.encodePacked("setWaitingUsersForRedeem", _user));
-        _setPendingAction(action);
+        _setPendingAction(action, bytes32(0));
         emit SignalSetWaitingUsersForRedeem(_user, action);
     }
 
@@ -220,7 +224,7 @@ contract XSPRKToken is Ownable2Step, ReentrancyGuard, ERC20("SparkDEX escrowed t
     */
     function setWaitingUsersForRedeem(address _user) external onlyOwner {
         bytes32 action = keccak256(abi.encodePacked("setWaitingUsersForRedeem", _user));
-        _validateAction(action);
+        _validateAction(action, bytes32(0));
         _clearAction(action);        
         require(_user != address(0), "invalid user");
         waitingUsersForRedeem[_user] = true;
@@ -238,12 +242,13 @@ contract XSPRKToken is Ownable2Step, ReentrancyGuard, ERC20("SparkDEX escrowed t
         uint256 minRedeemDuration_,
         uint256 maxRedeemDuration_,
         uint256 redeemDividendsAdjustment_) external onlyOwner {
-        bytes32 action = keccak256(abi.encodePacked("updateRedeemSettings", minRedeemRatio_,
+        bytes32 action = keccak256(abi.encodePacked("updateRedeemSettings"));
+        bytes32 parametersKey = keccak256(abi.encodePacked(minRedeemRatio_,
         maxRedeemRatio_,
         minRedeemDuration_,
         maxRedeemDuration_,
-        redeemDividendsAdjustment_));
-        _setPendingAction(action);
+        redeemDividendsAdjustment_));        
+        _setPendingAction(action, parametersKey);
         emit SignalUpdateRedeemSettings(minRedeemRatio_,
         maxRedeemRatio_,
         minRedeemDuration_,
@@ -264,12 +269,13 @@ contract XSPRKToken is Ownable2Step, ReentrancyGuard, ERC20("SparkDEX escrowed t
         uint256 maxRedeemDuration_,
         uint256 redeemDividendsAdjustment_
     ) external onlyOwner {
-        bytes32 action = keccak256(abi.encodePacked("updateRedeemSettings", minRedeemRatio_,
+        bytes32 action = keccak256(abi.encodePacked("updateRedeemSettings"));
+        bytes32 parametersKey = keccak256(abi.encodePacked(minRedeemRatio_,
         maxRedeemRatio_,
         minRedeemDuration_,
         maxRedeemDuration_,
-        redeemDividendsAdjustment_));
-        _validateAction(action);
+        redeemDividendsAdjustment_));        
+        _validateAction(action, parametersKey);
         _clearAction(action);      
         require(minRedeemRatio_ <= maxRedeemRatio_, "updateRedeemSettings: wrong ratio values");
         require(minRedeemDuration_ < maxRedeemDuration_, "updateRedeemSettings: wrong duration values");
@@ -303,8 +309,9 @@ contract XSPRKToken is Ownable2Step, ReentrancyGuard, ERC20("SparkDEX escrowed t
      * @dev signal updates fee paid by users when deallocating from "usageAddress"
      */
     function signalUpdateDeallocationFee(address usageAddress, uint256 fee) external onlyOwner {
-        bytes32 action = keccak256(abi.encodePacked("updateDeallocationFee", usageAddress, fee));
-        _setPendingAction(action);
+        bytes32 action = keccak256(abi.encodePacked("updateDeallocationFee", usageAddress));
+        bytes32 parametersKey = keccak256(abi.encodePacked(fee));         
+        _setPendingAction(action, parametersKey);
         emit SignalUpdateDeallocationFee(usageAddress, fee, action);
     }
 
@@ -312,8 +319,9 @@ contract XSPRKToken is Ownable2Step, ReentrancyGuard, ERC20("SparkDEX escrowed t
      * @dev Updates fee paid by users when deallocating from "usageAddress"
      */
     function updateDeallocationFee(address usageAddress, uint256 fee) external onlyOwner {
-        bytes32 action = keccak256(abi.encodePacked("updateDeallocationFee", usageAddress, fee));
-        _validateAction(action);
+        bytes32 action = keccak256(abi.encodePacked("updateDeallocationFee", usageAddress));
+        bytes32 parametersKey = keccak256(abi.encodePacked(fee));     
+        _validateAction(action, parametersKey);
         _clearAction(action);              
         require(fee <= MAX_DEALLOCATION_FEE, "updateDeallocationFee: too high");
 
@@ -629,21 +637,23 @@ contract XSPRKToken is Ownable2Step, ReentrancyGuard, ERC20("SparkDEX escrowed t
         _clearAction(_action);
     }
 
-    function _setPendingAction(bytes32 _action) private {
-        require(pendingActions[_action] == 0, "action already signalled");
-        pendingActions[_action] = block.timestamp + TIMELOCK_BUFFER;
-        emit SignalPendingAction(_action);
+    function _setPendingAction(bytes32 _action, bytes32 _parametersKey) private {
+        require(pendingActions[_action].timestamp == 0, "action already signalled");
+        pendingActions[_action].timestamp = block.timestamp + TIMELOCK_BUFFER;
+        pendingActions[_action].parametersKey = _parametersKey;
+        emit SignalPendingAction(_action, _parametersKey);
     }
 
-    function _validateAction(bytes32 _action) private view {
-        uint256 pendingAction = pendingActions[_action];
-        require(pendingAction != 0, "action not signalled");
-        require(pendingAction < block.timestamp, "action time not yet passed");
-        require(pendingAction + TIMELOCK_MAX_DURATION > block.timestamp, "action expired");
+    function _validateAction(bytes32 _action, bytes32 _parametersKey) private view {
+        PendingAction memory pendingAction = pendingActions[_action];
+        require(pendingAction.timestamp != 0, "action not signalled");
+        require(pendingAction.timestamp < block.timestamp, "action time not yet passed");
+        require(pendingAction.parametersKey == _parametersKey, "params different from signal");    
+        require(pendingAction.timestamp + TIMELOCK_MAX_DURATION > block.timestamp, "action expired");
     }
 
     function _clearAction(bytes32 _action) private {
-        require(pendingActions[_action] != 0, "invalid _action");
+        require(pendingActions[_action].timestamp != 0, "invalid _action");
         delete pendingActions[_action];
         emit ClearAction(_action);
     }
