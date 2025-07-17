@@ -586,4 +586,51 @@ contract Dividends is Ownable2Step, ReentrancyGuard, IXSPRKTokenUsage, IDividend
     /* solhint-disable not-rely-on-time */
     return block.timestamp;
   }
+
+  /// @notice calls function on behalf of this contract
+  /// @dev For flare airdrop and ftso delegation rewards  
+  /// @dev Not allowed to call reward token contracts except batchDelegate function
+  /// @dev reverted if reward tokens balance decreased after transaction
+  /// @param target address of contract
+  /// @param data tx data
+  function functionCall(
+      address target,
+      bytes calldata data
+  )
+      external
+      onlyOwner
+  {
+      require(target != address(0),"!target is empty");
+      uint256 tokenLength = _distributedTokens.length();
+      uint256[] memory beforeBalances = new uint256[](tokenLength);
+      for (uint256 i; i < tokenLength; i++) {
+          beforeBalances[i] = IERC20(_distributedTokens.at(i)).balanceOf(address(this));
+      }
+
+      bytes4 functionSel;
+      bytes4 x = bytes4(0xff000000);
+      functionSel ^= (x & data[0]);
+      functionSel ^= (x & data[1]) >> 8;
+      functionSel ^= (x & data[2]) >> 16;
+      functionSel ^= (x & data[3]) >> 24;
+
+      if(functionSel != 0xdc4fcda7 )  // ignore batchDelegate function For FTSO Provider Delegation
+          for (uint256 i; i < tokenLength ; i++) {
+              if(target == _distributedTokens.at(i)){
+                  revert("!token address not allowed");
+              }
+              
+          }      
+
+      Address.functionCall(target, data);
+
+      for (uint256 i; i < tokenLength; i++) {
+          uint256 afterBalance = IERC20(_distributedTokens.at(i)).balanceOf(address(this));
+
+          if(beforeBalances[i] > afterBalance){
+              revert("!token balance decreased");
+          }
+      }        
+  }
+
 }
