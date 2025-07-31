@@ -20,7 +20,7 @@ contract TokenDistributor is Ownable ,ReentrancyGuard {
     using AddressSet for AddressSet.State;
     using SafeCast for uint256;
 
-    uint256 public constant MAX_ALL_REWARD_TOKENS = 5;
+    uint256 public constant MAX_ALL_REWARD_TOKENS = 10;
     uint256 public constant MAX_BUFFER_DAY = 90;
 
     enum RewardStatus {
